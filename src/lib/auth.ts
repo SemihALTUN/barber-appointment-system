@@ -2,11 +2,13 @@
 import NextAuth, { CredentialsSignin } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { compare, hash } from "bcryptjs";
+import { Role } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60; // Rol değişikliği en geç 8 saatte yansır
+const ROLES = new Set<string>(Object.values(Role));
 
 const LoginSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -76,10 +78,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return token;
     },
     session({ session, token }) {
-      if (token.sub && token.role) {
+      // JWT alanları tip bildirimine güvenilmeden çalışma anında doğrulanır:
+      // Auth.js sürümüne göre token tipi `unknown` gelebilir ve geçersiz rol ayrıcalık vermemelidir.
+      const role = typeof token.role === "string" && ROLES.has(token.role) ? (token.role as Role) : null;
+      const staffId = typeof token.staffId === "string" ? token.staffId : null;
+      if (token.sub && role) {
         session.user.id = token.sub;
-        session.user.role = token.role;
-        session.user.staffId = token.staffId ?? null;
+        session.user.role = role;
+        session.user.staffId = staffId;
       }
       return session;
     },
