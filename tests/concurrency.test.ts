@@ -126,7 +126,8 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
   const createdAppointmentIds: string[] = [];
 
   let staffId: string;
-  let serviceId: string;
+  let serviceId: string; // 30 dk
+  let longServiceId: string; // 60 dk — farklı başlangıçlı örtüşme ve vardiya taşması testleri için
 
   async function insertAppointment(opts: {
     startTime: Date;
@@ -162,7 +163,13 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
     const user = await prisma.user.create({ data: { name: "Usta", phone: testPhone(), role: "STAFF" } });
     const staff = await prisma.staff.create({ data: { userId: user.id, title: "Usta Berber" } });
     const service = await prisma.service.create({ data: { name: "Saç Kesimi", durationMinutes: 30, price: 400 } });
-    await prisma.staffService.create({ data: { staffId: staff.id, serviceId: service.id } });
+    const longService = await prisma.service.create({ data: { name: "Saç + Sakal", durationMinutes: 60, price: 600 } });
+    await prisma.staffService.createMany({
+      data: [
+        { staffId: staff.id, serviceId: service.id },
+        { staffId: staff.id, serviceId: longService.id },
+      ],
+    });
     await prisma.workingShift.createMany({
       data: [
         { staffId: staff.id, dayOfWeek: TUESDAY, startTime: "09:00", endTime: "19:00" },
@@ -172,9 +179,10 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
 
     createdUserIds.push(user.id);
     createdStaffIds.push(staff.id);
-    createdServiceIds.push(service.id);
+    createdServiceIds.push(service.id, longService.id);
     staffId = staff.id;
     serviceId = service.id;
+    longServiceId = longService.id;
   });
 
   afterAll(async () => {
@@ -222,10 +230,10 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
   });
 
   it("Test 2: Farklı başlangıçlı fakat örtüşen aralıklarda tam 1 başarılı, 1 SLOT_UNAVAILABLE olmalıdır", async () => {
-    const slot1 = futureIstanbulSlot(TUESDAY, "10:00"); // 10:00–10:30
-    const slot2 = futureIstanbulSlot(TUESDAY, "10:15"); // 10:15–10:45 (örtüşür)
+    const slot1 = futureIstanbulSlot(TUESDAY, "10:00"); // 60 dk: 10:00–11:00
+    const slot2 = futureIstanbulSlot(TUESDAY, "10:30"); // 30 dk: 10:30–11:00 (örtüşür)
     const results = await Promise.all([
-      createAppointment({ staffId, serviceIds: [serviceId], startTime: slot1, customerName: "Can", customerPhone: testPhone() }),
+      createAppointment({ staffId, serviceIds: [longServiceId], startTime: slot1, customerName: "Can", customerPhone: testPhone() }),
       createAppointment({ staffId, serviceIds: [serviceId], startTime: slot2, customerName: "Cem", customerPhone: testPhone() }),
     ]);
 
@@ -248,16 +256,24 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
     expect(failureCodes).toEqual(["SLOT_UNAVAILABLE"]);
   });
 
-  it("Test 4: 15 dakikalık ızgarada milisaniyeli (10:00:00.500) ve geçersiz (10:07) zamanlar reddedilmelidir", async () => {
+  it("Test 4: 30 dakikalık ızgarada milisaniyeli (10:00:00.500), çeyrek saat (10:15) ve geçersiz (10:07) zamanlar reddedilmelidir", async () => {
     const base = futureIstanbulSlot(TUESDAY, "10:00");
     const msSlot = new Date(base.getTime() + 500);
+    const quarterSlot = addMinutes(base, 15);
     const offGridSlot = addMinutes(base, 7);
 
     const resMs = await createAppointment({ staffId, serviceIds: [serviceId], startTime: msSlot, customerName: "Mili", customerPhone: testPhone() });
+    const resQuarter = await createAppointment({ staffId, serviceIds: [serviceId], startTime: quarterSlot, customerName: "Çeyrek", customerPhone: testPhone() });
     const resGrid = await createAppointment({ staffId, serviceIds: [serviceId], startTime: offGridSlot, customerName: "Izgara", customerPhone: testPhone() });
 
     expectFailure(resMs, "INVALID_TIMEFRAME");
+    expectFailure(resQuarter, "INVALID_TIMEFRAME");
     expectFailure(resGrid, "INVALID_TIMEFRAME");
+
+    // Izgaraya uyan yarım saat başı kabul edilir
+    expectSuccess(
+      await createAppointment({ staffId, serviceIds: [serviceId], startTime: addMinutes(base, 30), customerName: "Yarım", customerPhone: testPhone() })
+    );
   });
 
   it("Test 5: Bağımsız PostgreSQL GiST Exclusion Kısıtı Testi (uygulama kontrolü baypas)", async () => {
@@ -438,8 +454,8 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
   it("Test 10: Gece yarısını aşan ve vardiya bitişini taşan randevular INVALID_TIMEFRAME ile reddedilmelidir", async () => {
     const resMidnight = await createAppointment({
       staffId,
-      serviceIds: [serviceId],
-      startTime: futureIstanbulSlot(TUESDAY, "23:45"),
+      serviceIds: [longServiceId],
+      startTime: futureIstanbulSlot(TUESDAY, "23:30"), // 23:30–00:30, ertesi güne taşar
       customerName: "Gece",
       customerPhone: testPhone(),
     });
@@ -447,8 +463,8 @@ describe("PostgreSQL 16 Eşzamanlılık, GiST ve Güvenlik Test Paketi (V1.2)", 
 
     const resOverrun = await createAppointment({
       staffId,
-      serviceIds: [serviceId],
-      startTime: futureIstanbulSlot(TUESDAY, "18:45"), // 19:15'e taşar
+      serviceIds: [longServiceId],
+      startTime: futureIstanbulSlot(TUESDAY, "18:30"), // 60 dk: 19:30'a taşar (mesai 19:00'da biter)
       customerName: "Vardiya Aşımı",
       customerPhone: testPhone(),
     });
