@@ -1,0 +1,166 @@
+// prisma/schema.prisma — V1.2
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  CUSTOMER
+  STAFF
+  ADMIN
+}
+
+enum AppointmentStatus {
+  CONFIRMED // Başlangıç ve kesin onaylı randevu
+  COMPLETED // Hizmet tamamlandı (Terminal)
+  CANCELLED // İptal edildi (Terminal)
+  NO_SHOW   // Müşteri gelmedi (Terminal)
+}
+
+enum BlockType {
+  BREAK
+  OFF_DUTY
+  EMERGENCY
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String?  @unique
+  phone        String?  @unique // NULL olabilir (anonimleştirmede unique çakışmasını önler)
+  passwordHash String?
+  role         Role     @default(CUSTOMER)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  staffProfile Staff?
+  appointments Appointment[]
+}
+
+model Staff {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String   // Örn: "Usta Berber", "Kıdemli Stilist"
+  bio       String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  services     StaffService[]
+  shifts       WorkingShift[]
+  timeBlocks   TimeBlock[]
+  appointments Appointment[]
+}
+
+model Service {
+  id              String   @id @default(cuid())
+  name            String   // Örn: "Saç Kesimi", "Sakal Tıraşı"
+  description     String?
+  durationMinutes Int
+  price           Decimal  @db.Decimal(10, 2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  staff            StaffService[]
+  appointmentItems AppointmentItem[]
+}
+
+model StaffService {
+  staffId   String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([staffId, serviceId])
+}
+
+model WorkingShift {
+  id        String  @id @default(cuid())
+  staffId   String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  dayOfWeek Int     // 0: Pazar ... 6: Cumartesi
+  startTime String  // "09:00"
+  endTime   String  // "19:00" (startTime < endTime zorunlu — SQL CHECK)
+  label     String?
+
+  @@index([staffId, dayOfWeek])
+}
+
+model TimeBlock {
+  id        String    @id @default(cuid())
+  staffId   String
+  staff     Staff     @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  startTime DateTime  @db.Timestamptz(6)
+  endTime   DateTime  @db.Timestamptz(6)
+  type      BlockType @default(BREAK)
+  reason    String?
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([staffId, startTime, endTime])
+}
+
+model Appointment {
+  id                   String            @id @default(cuid())
+  referenceCode        String            @unique // İnsan okunur takip kodu (örn: "BRB-M9K2-7E3B1A9F")
+  manageTokenHash      String            @unique // 256-bit token'ın SHA-256 özeti (açık token saklanmaz)
+  customerId           String?
+  customer             User?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName         String
+  customerPhone        String
+  staffId              String
+  staff                Staff             @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  startTime            DateTime          @db.Timestamptz(6)
+  endTime              DateTime          @db.Timestamptz(6)
+  totalDurationMinutes Int
+  totalPrice           Decimal           @db.Decimal(10, 2)
+  status               AppointmentStatus @default(CONFIRMED)
+  notes                String?
+  items                AppointmentItem[]
+  createdAt            DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime          @updatedAt @db.Timestamptz(6)
+
+  @@index([staffId, startTime, endTime])
+  @@index([customerPhone])
+  @@index([status])
+}
+
+model AppointmentItem {
+  id              String      @id @default(cuid())
+  appointmentId   String
+  appointment     Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  serviceId       String
+  service         Service     @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  orderIndex      Int         // Müşteri seçim sırası (0, 1, 2...)
+  serviceName     String      // Snapshot
+  durationMinutes Int         // Snapshot
+  unitPrice       Decimal     @db.Decimal(10, 2) // Snapshot
+
+  @@unique([appointmentId, orderIndex]) // Sıra bütünlüğü
+  @@unique([appointmentId, serviceId])  // Tekil hizmet
+  @@index([appointmentId])
+}
+
+model NoShowTracker {
+  id         String   @id @default(cuid())
+  phoneHash  String   @unique // HMAC-SHA256(phone, PEPPER)
+  count      Int      @default(1)
+  keyVersion Int      @default(1) // Pepper rotasyon versiyonu
+  lastNoShow DateTime @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+}
+
+model AnonymizationAuditLog {
+  id                String   @id @default(cuid())
+  processedDate     DateTime @default(now()) @db.Timestamptz(6)
+  recordsCount      Int
+  cleanedUsersCount Int
+  status            String   // "SUCCESS" | "FAILED"
+  errorMessage      String?
+}

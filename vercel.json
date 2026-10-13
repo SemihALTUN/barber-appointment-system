@@ -1,0 +1,3 @@
+{
+  "crons": [{ "path": "/api/cron/anonymize", "schedule": "0 0 * * *" }]
+}
